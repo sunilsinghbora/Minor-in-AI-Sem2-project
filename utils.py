@@ -20,7 +20,7 @@ try:
     import tensorflow as tf  # type: ignore
     from tensorflow import keras  # type: ignore
     from tensorflow.keras import layers  # type: ignore
-except Exception:  # pragma: no cover - allow running without TF installed
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - allow running without TF installed
     tf = None  # type: ignore
     keras = None  # type: ignore
     layers = None  # type: ignore
@@ -32,7 +32,7 @@ def finbert_available() -> bool:
     try:
         import transformers  # noqa: F401
         return True
-    except Exception:
+    except (OSError, ImportError, ValueError):
         return False
 
 def _get_finbert_pipeline():
@@ -98,8 +98,9 @@ def _ensure_rnn_model() -> Any:
             else:
                 _rnn_sentiment_model = keras.models.load_model(str(model_path))
             return _rnn_sentiment_model
-        except Exception:
-            pass
+        except (OSError, ImportError, ValueError):
+            import logging
+            logging.exception("Failed to load RNN sentiment model from %s", str(model_path))
     # Train on demand
     _train_rnn_model(str(model_path))
     if model_path.with_suffix(".keras").exists():
@@ -221,6 +222,7 @@ def search_tickers(query: str, limit: int = 10, region: str = "US", lang: str = 
         "region": region,
     }
     headers = {"User-Agent": "Mozilla/5.0"}
+    import json
     try:
         r = requests.get(url, params=params, headers=headers, timeout=8)
         r.raise_for_status()
@@ -247,18 +249,20 @@ def search_tickers(query: str, limit: int = 10, region: str = "US", lang: str = 
                 "exchDisp": exchDisp,
             })
         return out[:limit]
-    except Exception:
+    except requests.RequestException:
+        return []
+    except json.JSONDecodeError:
         return []
 
 
 def validate_ticker_symbol(symbol: str) -> bool:
     """Quick validation by fetching minimal history; returns True if data exists."""
-    s = (symbol or "").strip()
-    if not s:
-        return False
     try:
         t = yf.Ticker(s)
         df = t.history(period="1mo", interval="1d", auto_adjust=False)
+        return not df.empty
+    except (yf.shared._exceptions.YFRequestError, ValueError, IndexError):
+        return False
         return not df.empty
     except Exception:
         return False
@@ -585,6 +589,7 @@ def train_and_forecast_close_only(
 
 
 def get_company_name(ticker: str) -> Optional[str]:
+    import json
     try:
         info = yf.Ticker(ticker).fast_info
         name = info.get("shortName") if isinstance(info, dict) else None
@@ -600,7 +605,9 @@ def get_company_name(ticker: str) -> Optional[str]:
                 .get("shortName")
             )
         return name
-    except Exception:
+    except requests.RequestException:
+        return None
+    except json.JSONDecodeError:
         return None
 
 
@@ -640,8 +647,11 @@ def fetch_news_and_sentiment(
                 weight = 0.5 ** (days / hl)
                 items.append({
                     "title": title,
-                    "link": link,
-                    "published": published.isoformat(),
+        except (feedparser.FeedParserError, requests.RequestException) as e:
+            # Log the error for debugging, but continue processing other feeds
+            import logging
+            logging.warning(f"Error parsing feed {url}: {e}")
+            continue
                     # score computed after collection using requested model
                     "score": 0.0,
                     "weight": float(weight),

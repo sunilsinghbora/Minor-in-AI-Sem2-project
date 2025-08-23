@@ -17,7 +17,7 @@ from utils import (
 try:
     U = importlib.import_module("utils")
     TF_AVAILABLE = getattr(U, "keras", None) is not None
-except Exception:
+except (ImportError, ModuleNotFoundError):
     TF_AVAILABLE = False
 
 # Optional single-box autocomplete component
