@@ -1,0 +1,676 @@
+from __future__ import annotations
+import datetime as dt
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict, Any, Callable
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import feedparser
+import requests
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+# TensorFlow is optional at import time. We only require it if a neural model is selected.
+try:
+    import tensorflow as tf  # type: ignore
+    from tensorflow import keras  # type: ignore
+    from tensorflow.keras import layers  # type: ignore
+except Exception:  # pragma: no cover - allow running without TF installed
+    tf = None  # type: ignore
+    keras = None  # type: ignore
+    layers = None  # type: ignore
+
+# Optional: FinBERT sentiment (transformer-based). Lazily imported if requested.
+_finbert_pipeline = None
+
+def finbert_available() -> bool:
+    try:
+        import transformers  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+def _get_finbert_pipeline():
+    global _finbert_pipeline
+    if _finbert_pipeline is not None:
+        return _finbert_pipeline
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification, TextClassificationPipeline
+    model_name = "yiyanghkust/finbert-tone"
+    tok = AutoTokenizer.from_pretrained(model_name)
+    mdl = AutoModelForSequenceClassification.from_pretrained(model_name)
+    _finbert_pipeline = TextClassificationPipeline(model=mdl, tokenizer=tok, return_all_scores=False)
+    return _finbert_pipeline
+
+def finbert_sentiment_scores(texts: List[str]) -> List[float]:
+    if not texts:
+        return []
+    try:
+        pipe = _get_finbert_pipeline()
+        preds = pipe(texts, truncation=True)
+        out: List[float] = []
+        for p in preds:
+            lab = (p.get('label') or '').lower()
+            sc = float(p.get('score', 0.0))
+            if 'pos' in lab:
+                out.append(sc)
+            elif 'neg' in lab:
+                out.append(-sc)
+            else:
+                out.append(0.0)
+        return out
+    except Exception:
+        return [0.0 for _ in texts]
+
+# Local RNN sentiment model (Keras) — trained on demand
+_rnn_sentiment_model: Any = None
+_rnn_model_dir = Path(__file__).parent / "models" / "headline_rnn"
+
+def _build_headline_rnn(max_tokens: int = 20000, seq_len: int = 64, embed_dim: int = 64, rnn_units: int = 64, dropout: float = 0.3):
+    # String input, include TextVectorization inside for portability
+    from tensorflow.keras import layers as L
+    text_in = L.Input(shape=(1,), dtype=tf.string, name="text")
+    vec = L.TextVectorization(max_tokens=max_tokens, output_mode="int", output_sequence_length=seq_len)
+    # Vectorization layer needs adapt before training — return as a functional edge
+    x = vec(text_in)
+    x = L.Embedding(input_dim=max_tokens, output_dim=embed_dim, mask_zero=True)(x)
+    x = L.Bidirectional(L.GRU(rnn_units))(x)
+    x = L.Dropout(dropout)(x)
+    out = L.Dense(1, activation="sigmoid")(x)
+    model = keras.Model(text_in, out)
+    model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+    return model, vec
+
+def _ensure_rnn_model() -> Any:
+    global _rnn_sentiment_model
+    if _rnn_sentiment_model is not None:
+        return _rnn_sentiment_model
+    model_path = _rnn_model_dir
+    if (model_path / "saved_model.pb").exists() or (model_path.with_suffix(".keras")).exists():
+        try:
+            # Prefer Keras format if present
+            if model_path.with_suffix(".keras").exists():
+                _rnn_sentiment_model = keras.models.load_model(str(model_path.with_suffix(".keras")))
+            else:
+                _rnn_sentiment_model = keras.models.load_model(str(model_path))
+            return _rnn_sentiment_model
+        except Exception:
+            pass
+    # Train on demand
+    _train_rnn_model(str(model_path))
+    if model_path.with_suffix(".keras").exists():
+        _rnn_sentiment_model = keras.models.load_model(str(model_path.with_suffix(".keras")))
+    else:
+        _rnn_sentiment_model = keras.models.load_model(str(model_path))
+    return _rnn_sentiment_model
+
+def _train_rnn_model(model_dir: str, epochs: int = 4, batch_size: int = 64):
+    from datasets import load_dataset
+    os.makedirs(model_dir if model_dir.endswith(".keras") is False else os.path.dirname(model_dir), exist_ok=True)
+    ds = load_dataset("financial_phrasebank", "sentences_allagree")
+    data = ds["train"]
+    texts: List[str] = []
+    labels: List[int] = []
+    # Map labels: assume 0=negative, 1=neutral, 2=positive; drop neutral
+    for rec in data:
+        t = rec.get("sentence") or rec.get("text") or ""
+        y = int(rec.get("label", -1))
+        if y == 2:
+            texts.append(t)
+            labels.append(1)
+        elif y == 0:
+            texts.append(t)
+            labels.append(0)
+        else:
+            continue
+    # Simple split
+    n = len(texts)
+    idx = np.arange(n)
+    rng = np.random.default_rng(42)
+    rng.shuffle(idx)
+    split = int(0.85 * n)
+    tr_idx, te_idx = idx[:split], idx[split:]
+    Xtr = [texts[i] for i in tr_idx]
+    ytr = np.array([labels[i] for i in tr_idx], dtype="float32")
+    Xte = [texts[i] for i in te_idx]
+    yte = np.array([labels[i] for i in te_idx], dtype="float32")
+
+    model, vec = _build_headline_rnn()
+    # Adapt vectorizer
+    vec.adapt(tf.data.Dataset.from_tensor_slices(Xtr).batch(256))
+    cb = [keras.callbacks.EarlyStopping(patience=2, restore_best_weights=True, monitor="val_accuracy")]
+    model.fit(np.array(Xtr, dtype=object)[:, None], ytr, validation_data=(np.array(Xte, dtype=object)[:, None], yte), epochs=epochs, batch_size=batch_size, verbose=0, callbacks=cb)
+    # Save as .keras portable format
+    keras_path = Path(model_dir).with_suffix(".keras")
+    model.save(keras_path)
+
+def sentiment_rnn_scores(headlines: List[str]) -> List[float]:
+    if not headlines:
+        return []
+    mdl = _ensure_rnn_model()
+    probs = mdl.predict(np.array(headlines, dtype=object)[:, None], verbose=0).flatten()
+    # map prob to [-1,1]
+    return [float(2 * p - 1) for p in probs]
+
+
+@dataclass
+class ModelConfig:
+    window: int = 30
+    horizon: int = 10
+    test_split: float = 0.1
+    filter_outliers: bool = False
+    outlier_threshold: float = 5.0  # percent, inclusive
+    soften_spikes: bool = False
+    spike_threshold: float = 10.0  # percent, inclusive
+    spike_factor: float = 0.5      # new = prev + factor * delta
+
+
+def fetch_prices(ticker: str, period: str = "1y") -> pd.DataFrame:
+    t = yf.Ticker(ticker)
+    code = (period or "1y").lower()
+    # Map extended codes; yfinance doesn't support 20y/25y directly, so filter from max
+    if code in {"1w", "1week"}:
+        start = (dt.datetime.utcnow() - dt.timedelta(days=7)).date()
+        df = t.history(start=start, interval="1d", auto_adjust=False)
+    elif code in {"1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd"}:
+        df = t.history(period=code, interval="1d", auto_adjust=False)
+    elif code in {"20y", "25y"}:
+        df = t.history(period="max", interval="1d", auto_adjust=False)
+        years = 20 if code == "20y" else 25
+        cutoff = (dt.datetime.utcnow() - dt.timedelta(days=365 * years)).date()
+        # Will filter after reset_index/rename
+    elif code in {"max"}:
+        df = t.history(period="max", interval="1d", auto_adjust=False)
+    else:
+        # Fallback
+        df = t.history(period="1y", interval="1d", auto_adjust=False)
+    if df.empty:
+        raise RuntimeError("No data from Yahoo Finance")
+    df = df.reset_index()
+    df.rename(columns={"Date": "date", "Close": "price", "Open": "open"}, inplace=True)
+    df = df[["date", "open", "price"]].dropna()
+    # Ensure timezone-naive datetimes for safe comparisons
+    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+    # Apply 20y/25y cutoff if needed
+    if code in {"20y", "25y"}:
+        years = 20 if code == "20y" else 25
+        cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=365 * years)
+        df = df[df["date"] >= cutoff]
+    return df
+
+
+def search_tickers(query: str, limit: int = 10, region: str = "US", lang: str = "en-US") -> List[Dict[str, Any]]:
+    """
+    Lightweight symbol search using Yahoo Finance public search endpoint.
+    Returns a list of dicts: {symbol, name, exch, type, exchDisp} filtered to likely equities/etfs.
+    """
+    q = (query or "").strip()
+    if len(q) < 2:
+        return []
+    url = "https://query2.finance.yahoo.com/v1/finance/search"
+    params = {
+        "q": q,
+        "quotesCount": max(1, int(limit)),
+        "newsCount": 0,
+        "listsCount": 0,
+        "lang": lang,
+        "region": region,
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=8)
+        r.raise_for_status()
+        data = r.json() or {}
+        quotes = data.get("quotes", []) or []
+        out: List[Dict[str, Any]] = []
+        for it in quotes:
+            symbol = it.get("symbol")
+            name = it.get("shortname") or it.get("longname") or it.get("quoteType") or ""
+            qt = (it.get("quoteType") or "").upper()
+            exch = it.get("exch") or it.get("exchange") or ""
+            exchDisp = it.get("exchDisp") or it.get("exchangeDisp") or exch
+            if not symbol:
+                continue
+            # Prefer common types
+            if qt and qt not in {"EQUITY", "ETF", "MUTUALFUND", "INDEX"}:
+                # still include but deprioritize; we'll add anyway and let caller limit
+                pass
+            out.append({
+                "symbol": symbol,
+                "name": name,
+                "type": qt,
+                "exch": exch,
+                "exchDisp": exchDisp,
+            })
+        return out[:limit]
+    except Exception:
+        return []
+
+
+def validate_ticker_symbol(symbol: str) -> bool:
+    """Quick validation by fetching minimal history; returns True if data exists."""
+    s = (symbol or "").strip()
+    if not s:
+        return False
+    try:
+        t = yf.Ticker(s)
+        df = t.history(period="1mo", interval="1d", auto_adjust=False)
+        return not df.empty
+    except Exception:
+        return False
+
+
+def inclusive_outlier_mask(series: pd.Series, pct_threshold: float) -> pd.Series:
+    # True means keep
+    pct = series.pct_change() * 100.0
+    mask = pct.abs().le(pct_threshold) | pct.isna()  # keep first NaN
+    # Always keep the first value
+    mask.iloc[0] = True
+    return mask
+
+
+def soften_spikes_train_only(series: pd.Series, train_end_idx: int, threshold: float, factor: float) -> Tuple[pd.Series, List[int]]:
+    s = series.copy().astype(float)
+    changed_idx: List[int] = []
+    pct = s.pct_change() * 100.0
+    for i in range(1, min(len(s), train_end_idx + 1)):
+        if abs(pct.iloc[i]) >= threshold:
+            prev = s.iloc[i - 1]
+            delta = s.iloc[i] - prev
+            s.iloc[i] = prev + factor * delta
+            changed_idx.append(i)
+    return s, changed_idx
+
+
+def make_windows_close_only(values: np.ndarray, window: int) -> Tuple[np.ndarray, np.ndarray]:
+    X, y = [], []
+    for i in range(window, len(values)):
+        X.append(values[i - window : i])
+        y.append(values[i])
+    return np.array(X), np.array(y)
+
+def _build_keras_model(input_len: int, kind: str = "lstm", dropout: float = 0.3) -> Any:
+    if keras is None or layers is None:
+        raise RuntimeError(
+            "Neural models require TensorFlow/Keras. Select 'sklearn (fast)' or install a compatible TensorFlow package."
+        )
+    kind = (kind or "lstm").lower()
+    is_gru = "gru" in kind
+    bi = kind.startswith("bi") or kind in {"bilstm", "bigru", "bidirectional lstm", "bidirectional gru"}
+    deep = kind.startswith("deep") or ("deep" in kind)
+
+    seq = keras.Sequential()
+    seq.add(layers.Input(shape=(input_len, 1)))
+    RNN = layers.GRU if is_gru else layers.LSTM
+    if bi:
+        seq.add(layers.Bidirectional(RNN(64, return_sequences=deep)))
+    else:
+        seq.add(RNN(64, return_sequences=deep))
+    seq.add(layers.Dropout(dropout))
+    if deep:
+        if bi:
+            seq.add(layers.Bidirectional(RNN(32)))
+        else:
+            seq.add(RNN(32))
+        seq.add(layers.Dropout(dropout))
+    seq.add(layers.Dense(1))
+    seq.compile(optimizer="adam", loss="mse")
+    return seq
+
+def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    if len(y_true) == 0 or len(y_pred) == 0:
+        return {"RMSE": float("nan"), "MAE": float("nan"), "MAPE": float("nan"), "R2": float("nan")}
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    mae = float(mean_absolute_error(y_true, y_pred))
+    denom = np.clip(np.abs(y_true), 1e-8, None)
+    mape = float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
+    r2 = float(r2_score(y_true, y_pred)) if len(y_true) >= 2 else float("nan")
+    return {"RMSE": rmse, "MAE": mae, "MAPE": mape, "R2": r2}
+
+
+def _train_and_forecast_core(
+    df: pd.DataFrame,
+    cfg: ModelConfig,
+    model_kind: str,
+    epochs: int,
+    batch_size: int,
+    dropout: float,
+    progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
+) -> Dict[str, Any]:
+    # Prepare base series
+    close = df["price"].astype(float).reset_index(drop=True)
+
+    # Outlier filtering on absolute day-over-day % change (inclusive)
+    kept_mask = pd.Series([True] * len(close))
+    if cfg.filter_outliers:
+        mask = inclusive_outlier_mask(close, cfg.outlier_threshold)
+        kept_mask = mask
+        close_filtered = close[mask].reset_index(drop=True)
+    else:
+        close_filtered = close.copy()
+
+    # Train/test split (chronological)
+    n = len(close_filtered)
+    test_n = max(1, int(n * cfg.test_split))
+    train_n = max(1, n - test_n)
+
+    # Train-only spike softening before scaling
+    close_train = close_filtered.iloc[:train_n]
+    close_test = close_filtered.iloc[train_n:]
+
+    changed_idx: List[int] = []
+    if cfg.soften_spikes:
+        soft_train, changed = soften_spikes_train_only(
+            close_filtered, train_end_idx=train_n - 1, threshold=cfg.spike_threshold, factor=cfg.spike_factor
+        )
+        close_train = soft_train.iloc[:train_n]
+        changed_idx = [i for i in changed if i < train_n]
+
+    # Scale
+    scaler = StandardScaler()
+    train_vals = close_train.values.reshape(-1, 1)
+    scaler.fit(train_vals)
+    full_scaled = scaler.transform(close_filtered.values.reshape(-1, 1)).flatten()
+
+    # Windows on scaled series
+    X_all, y_all = make_windows_close_only(full_scaled, cfg.window)
+    # determine split index in windowed space
+    split_idx = max(1, train_n - cfg.window)
+    X_train, y_train = X_all[:split_idx], y_all[:split_idx]
+    X_test, y_test = X_all[split_idx:], y_all[split_idx:]
+
+    history = None
+    mk = (model_kind or "sklearn").lower()
+    if mk != "sklearn":
+        if keras is None:
+            # Fail fast with a clear message if user selects a neural model without TF available
+            raise RuntimeError(
+                "TensorFlow/Keras is not available in this environment. Install TensorFlow (CPU) compatible with Python 3.12 (e.g., 2.16.1) or switch to 'sklearn (fast)'."
+            )
+        # reshape to [samples, timesteps, features]
+        Xtr = X_train[..., None]
+        Xte = X_test[..., None]
+        Xall = X_all[..., None]
+        model = _build_keras_model(cfg.window, mk, dropout=dropout)
+        # Train one epoch at a time to report progress
+        total_epochs = int(max(1, epochs))
+        history = {"loss": [], "val_loss": []}
+        for ep in range(total_epochs):
+            h = model.fit(
+                Xtr,
+                y_train,
+                validation_data=(Xte, y_test) if len(Xte) else None,
+                epochs=1,
+                batch_size=int(max(1, batch_size)),
+                verbose=0,
+            )
+            l = float(h.history.get("loss", [np.nan])[-1])
+            vl = float(h.history.get("val_loss", [np.nan])[-1]) if len(Xte) else np.nan
+            history["loss"].append(l)
+            if not np.isnan(vl):
+                history["val_loss"].append(vl)
+            if callable(progress_callback):
+                try:
+                    progress_callback(ep + 1, total_epochs, l)
+                except Exception:
+                    pass
+        y_pred_all = model.predict(Xall, verbose=0).flatten()
+    else:
+        # Fast, CPU-friendly regressor
+        model = GradientBoostingRegressor(random_state=42)
+        model.fit(X_train, y_train)
+        # Fitted (train+test) backcast
+        y_pred_all = model.predict(X_all)
+
+    # Metrics on test
+    def inv(v):
+        return scaler.inverse_transform(np.array(v).reshape(-1, 1)).flatten()
+
+    fitted_prices = inv(y_pred_all)
+    actual_prices = inv(y_all)
+    # Metrics on test region (inverse scaled)
+    if len(y_test):
+        y_test_inv = inv(y_test)
+        y_pred_test_inv = inv(y_pred_all[len(y_train) : len(y_train) + len(y_test)])
+        m = _metrics(y_test_inv, y_pred_test_inv)
+    else:
+        m = {"RMSE": float("nan"), "MAE": float("nan"), "MAPE": float("nan"), "R2": float("nan")}
+
+    # build aligned series to original filtered timeline
+    fitted_full = [np.nan] * len(full_scaled)
+    # windows produce predictions starting at index cfg.window
+    for i, val in enumerate(fitted_prices, start=cfg.window):
+        fitted_full[i] = val
+
+    # Future forecasting (iterative)
+    last_window = full_scaled[-cfg.window :].tolist()
+    future_scaled = []
+    for _ in range(cfg.horizon):
+        if mk != "sklearn":
+            # Keras models expect [batch, timesteps, features]
+            x_in = np.array(last_window, dtype=float).reshape(1, cfg.window, 1)
+            pred = model.predict(x_in, verbose=0)
+            next_scaled = float(np.ravel(pred)[0])
+        else:
+            # Sklearn models trained on 2D [samples, timesteps]
+            next_scaled = float(model.predict([last_window])[0])
+        future_scaled.append(next_scaled)
+        last_window = last_window[1:] + [next_scaled]
+    future_prices = inv(future_scaled)
+
+    # Map filtered indices back to original df indices
+    kept_indices = np.where(kept_mask.values)[0].tolist()
+
+    # Derive train/test boundary in original filtered index
+    test_start_idx = cfg.window + split_idx  # in filtered index space
+
+    return {
+        "kept_indices": kept_indices,
+        "train_test_boundary": int(test_start_idx),
+        "fitted_on_filtered": fitted_full,  # length == len(close_filtered)
+        "filtered_len": int(len(close_filtered)),
+        "scaler": "StandardScaler",
+        "features": "close",
+        "changed_train_indices": changed_idx,
+        "future": future_prices.tolist(),
+        "metrics": m,
+        "history": history,
+        "model": mk,
+    }
+
+
+def train_and_forecast_close_only_sklearn(
+    df: pd.DataFrame,
+    cfg: ModelConfig,
+    epochs: int = 1,
+    batch_size: int = 32,
+    dropout: float = 0.0,
+    progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
+) -> Dict[str, Any]:
+    return _train_and_forecast_core(df, cfg, model_kind="sklearn", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=None)
+
+
+def train_and_forecast_close_only_lstm(
+    df: pd.DataFrame,
+    cfg: ModelConfig,
+    epochs: int = 30,
+    batch_size: int = 32,
+    dropout: float = 0.3,
+    progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
+) -> Dict[str, Any]:
+    return _train_and_forecast_core(df, cfg, model_kind="lstm", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+
+
+def train_and_forecast_close_only_gru(
+    df: pd.DataFrame,
+    cfg: ModelConfig,
+    epochs: int = 30,
+    batch_size: int = 32,
+    dropout: float = 0.3,
+    progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
+) -> Dict[str, Any]:
+    return _train_and_forecast_core(df, cfg, model_kind="gru", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+
+
+def train_and_forecast_close_only_bilstm(
+    df: pd.DataFrame,
+    cfg: ModelConfig,
+    epochs: int = 30,
+    batch_size: int = 32,
+    dropout: float = 0.3,
+    progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
+) -> Dict[str, Any]:
+    return _train_and_forecast_core(df, cfg, model_kind="bilstm", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+
+
+def train_and_forecast_close_only_bigru(
+    df: pd.DataFrame,
+    cfg: ModelConfig,
+    epochs: int = 30,
+    batch_size: int = 32,
+    dropout: float = 0.3,
+    progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
+) -> Dict[str, Any]:
+    return _train_and_forecast_core(df, cfg, model_kind="bigru", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+
+
+def train_and_forecast_close_only_deep_lstm(
+    df: pd.DataFrame,
+    cfg: ModelConfig,
+    epochs: int = 30,
+    batch_size: int = 32,
+    dropout: float = 0.3,
+    progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
+) -> Dict[str, Any]:
+    return _train_and_forecast_core(df, cfg, model_kind="deep-lstm", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+
+
+def train_and_forecast_close_only_deep_gru(
+    df: pd.DataFrame,
+    cfg: ModelConfig,
+    epochs: int = 30,
+    batch_size: int = 32,
+    dropout: float = 0.3,
+    progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
+) -> Dict[str, Any]:
+    return _train_and_forecast_core(df, cfg, model_kind="deep-gru", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+
+
+def train_and_forecast_close_only(
+    df: pd.DataFrame,
+    cfg: ModelConfig,
+    model_kind: str = "sklearn",
+    epochs: int = 30,
+    batch_size: int = 32,
+    dropout: float = 0.3,
+    progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
+) -> Dict[str, Any]:
+    """Backward-compatible wrapper. Prefer calling the specific functions above for readability."""
+    mapper = {
+        "sklearn": train_and_forecast_close_only_sklearn,
+        "lstm": train_and_forecast_close_only_lstm,
+        "gru": train_and_forecast_close_only_gru,
+        "bilstm": train_and_forecast_close_only_bilstm,
+        "bigru": train_and_forecast_close_only_bigru,
+        "deep-lstm": train_and_forecast_close_only_deep_lstm,
+        "deep-gru": train_and_forecast_close_only_deep_gru,
+    }
+    mk = (model_kind or "sklearn").lower()
+    func = mapper.get(mk, train_and_forecast_close_only_sklearn)
+    return func(df, cfg, epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+
+
+def get_company_name(ticker: str) -> Optional[str]:
+    try:
+        info = yf.Ticker(ticker).fast_info
+        name = info.get("shortName") if isinstance(info, dict) else None
+        if not name:
+            # fallback to quoteSummary API
+            url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=price"
+            r = requests.get(url, timeout=10)
+            j = r.json()
+            name = (
+                j.get("quoteSummary", {})
+                .get("result", [{}])[0]
+                .get("price", {})
+                .get("shortName")
+            )
+        return name
+    except Exception:
+        return None
+
+
+def fetch_news_and_sentiment(
+    ticker: str,
+    lookback_days: int = 90,
+    half_life_days: float = 30.0,
+    model: str | None = None,  # 'vader' | 'finbert' | 'rnn'
+) -> Dict[str, Any]:
+    feeds = [
+        f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}",
+        f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en",
+    ]
+    analyzer = SentimentIntensityAnalyzer()
+    items: List[Dict[str, Any]] = []
+    now = dt.datetime.utcnow()
+    cutoff = now - dt.timedelta(days=lookback_days)
+
+    for url in feeds:
+        try:
+            feed = feedparser.parse(url)
+            for e in feed.entries:
+                title = getattr(e, "title", "")
+                link = getattr(e, "link", "")
+                # parse date safely
+                published = None
+                for key in ("published_parsed", "updated_parsed"):
+                    if hasattr(e, key) and getattr(e, key):
+                        tup = getattr(e, key)
+                        published = dt.datetime(*tup[:6])
+                        break
+                if not published or published < cutoff:
+                    continue
+                # recency weight: exponential half-life
+                days = max(0.0, (now - published).total_seconds() / 86400.0)
+                hl = max(1e-6, float(half_life_days))
+                weight = 0.5 ** (days / hl)
+                items.append({
+                    "title": title,
+                    "link": link,
+                    "published": published.isoformat(),
+                    # score computed after collection using requested model
+                    "score": 0.0,
+                    "weight": float(weight),
+                })
+        except Exception:
+            continue
+
+    # Compute sentiment scores
+    chosen = (model or "vader").lower()
+    if items:
+        if chosen == "finbert" and finbert_available():
+            scores = finbert_sentiment_scores([it["title"] for it in items])
+            for it, sc in zip(items, scores):
+                it["score"] = float(sc)
+        elif chosen == "rnn":
+            scores = sentiment_rnn_scores([it["title"] for it in items])
+            for it, sc in zip(items, scores):
+                it["score"] = float(sc)
+        else:
+            for it in items:
+                it["score"] = analyzer.polarity_scores(it["title"])['compound']
+
+    enough = len(items) >= 5
+    avg = float(np.mean([i["score"] for i in items])) if items else 0.0
+    if items:
+        w = np.array([i.get("weight", 1.0) for i in items], dtype=float)
+        s = np.array([i["score"] for i in items], dtype=float)
+        wsum = float(w.sum()) if float(w.sum()) > 0 else 1.0
+        wavg = float((w * s).sum() / wsum)
+    else:
+        wavg = 0.0
+    return {"enough": enough, "average": avg, "weighted_average": wavg, "half_life_days": float(half_life_days), "model": chosen, "articles": items}
