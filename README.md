@@ -8,7 +8,7 @@ A Python-only Streamlit app for quick stock analysis and forecasting with:
 - Plotly chart: Actual, Training fit, Testing fit, and Future forecast
 - Company name next to ticker
 
-Neural models (LSTM/GRU variants) are supported optionally if TensorFlow/Keras is installed. On Streamlit Cloud, we disable TensorFlow to keep installs fast and reliable.
+Neural models (LSTM/GRU variants) are supported and enabled on Streamlit Cloud via a CPU build of TensorFlow.
 
 ## Quick start
 
@@ -17,16 +17,17 @@ Neural models (LSTM/GRU variants) are supported optionally if TensorFlow/Keras i
 - Run
   - streamlit run streamlit_app.py
 
-## Optional: enable neural models locally
+## Neural models
 
-TensorFlow is not included in `requirements.txt` to avoid build failures on Python 3.13 in hosted environments. Locally, you can enable the neural models by installing a compatible TensorFlow build for your Python version, for example:
+This app uses TensorFlow (CPU) 2.20.0 to enable LSTM/GRU on Cloud. First deploy after this change will be slower. If builds ever fail due to resource limits, you can remove TensorFlow from `requirements.txt` to fall back to sklearn-only.
+
+Local setup tip: if you’re running locally, you can install a compatible TF version too:
 
 ```
-# Example (adjust to a TF version supported by your Python):
 pip install tensorflow==2.20.0
 ```
 
-If TensorFlow is not installed, the app will automatically fall back to the fast scikit-learn model and hide neural options in the UI.
+Without TensorFlow, the app automatically hides neural options and uses the fast sklearn model.
 
 ## Notes
 - Defaults are chosen to run everywhere (CPU). Neural models are heavier and optional.
