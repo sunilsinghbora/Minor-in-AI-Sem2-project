@@ -387,7 +387,7 @@ def _train_and_forecast_core(
         if keras is None:
             # Fail fast with a clear message if user selects a neural model without TF available
             raise RuntimeError(
-                "TensorFlow/Keras is not available in this environment. Install TensorFlow (CPU) compatible with Python 3.12 (e.g., 2.16.1) or switch to 'sklearn (fast)'."
+                "TensorFlow/Keras is not available in this environment. Install a TensorFlow version compatible with your Python, or switch to 'sklearn (fast)'."
             )
         # Reshape to [samples, timesteps, features] for Keras layers
         Xtr = X_train[..., None]
