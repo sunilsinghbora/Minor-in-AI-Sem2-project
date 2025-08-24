@@ -1,9 +1,17 @@
+"""Utility functions for the Streamlit stock forecasting app.
+
+This module is written to be beginner-friendly:
+- Clear function/class docstrings explain inputs/outputs and key steps.
+- Inline comments highlight why each step is needed.
+- Return types use standard numpy/pandas/Python types Streamlit can display easily.
+
+Tip: TensorFlow/Keras is optional. If it's not installed, use the fast scikit-learn model.
+"""
+
 from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any, Callable
-import os
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -15,11 +23,9 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # TensorFlow is optional at import time. We only require it if a neural model is selected.
 try:
-    import tensorflow as tf  # type: ignore
     from tensorflow import keras  # type: ignore
     from tensorflow.keras import layers  # type: ignore
 except (ImportError, ModuleNotFoundError):  # pragma: no cover - allow running without TF installed
-    tf = None  # type: ignore
     keras = None  # type: ignore
     layers = None  # type: ignore
 
@@ -28,6 +34,18 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover - allow running w
 
 @dataclass
 class ModelConfig:
+    """Configuration for the time-series model.
+
+    Attributes
+    - window: Number of past days used to predict the next day (sliding window size).
+    - horizon: How many days to forecast into the future.
+    - test_split: Fraction of data reserved for testing (chronological split).
+    - filter_outliers: Drop days with very large percent moves (see outlier_threshold).
+    - outlier_threshold: Inclusive percent threshold for filtering (e.g., 5.0 = ±5%).
+    - soften_spikes: Smooth unusually large moves in the training region.
+    - spike_threshold: Inclusive percent threshold for spike softening.
+    - spike_factor: Softening factor: new = prev + factor * (curr - prev).
+    """
     window: int = 30
     horizon: int = 10
     test_split: float = 0.1
@@ -39,18 +57,30 @@ class ModelConfig:
 
 
 def fetch_prices(ticker: str, period: str = "1y") -> pd.DataFrame:
+    """Fetch daily OHLC data and return a minimal DataFrame.
+
+    Parameters
+    - ticker: Symbol like "AAPL" or exchange-qualified like "RELIANCE.NS".
+    - period: Range string understood by yfinance (e.g., "1mo", "1y", "5y", "10y", "max").
+
+    Returns
+    - DataFrame with columns [date (timezone-naive), open, price].
+
+    Raises
+    - RuntimeError if no data is returned.
+    """
     t = yf.Ticker(ticker)
     code = (period or "1y").lower()
     # Map extended codes; yfinance doesn't support 20y/25y directly, so filter from max
     if code in {"1w", "1week"}:
-        start = (dt.datetime.utcnow() - dt.timedelta(days=7)).date()
+        start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).date()
         df = t.history(start=start, interval="1d", auto_adjust=False)
     elif code in {"1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd"}:
         df = t.history(period=code, interval="1d", auto_adjust=False)
     elif code in {"20y", "25y"}:
         df = t.history(period="max", interval="1d", auto_adjust=False)
         years = 20 if code == "20y" else 25
-        cutoff = (dt.datetime.utcnow() - dt.timedelta(days=365 * years)).date()
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=365 * years)).date()
         # Will filter after reset_index/rename
     elif code in {"max"}:
         df = t.history(period="max", interval="1d", auto_adjust=False)
@@ -67,15 +97,15 @@ def fetch_prices(ticker: str, period: str = "1y") -> pd.DataFrame:
     # Apply 20y/25y cutoff if needed
     if code in {"20y", "25y"}:
         years = 20 if code == "20y" else 25
-        cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=365 * years)
+        cutoff = pd.Timestamp.now(tz="UTC").tz_convert(None) - pd.Timedelta(days=365 * years)
         df = df[df["date"] >= cutoff]
     return df
 
 
 def search_tickers(query: str, limit: int = 10, region: str = "US", lang: str = "en-US") -> List[Dict[str, Any]]:
-    """
-    Lightweight symbol search using Yahoo Finance public search endpoint.
-    Returns a list of dicts: {symbol, name, exch, type, exchDisp} filtered to likely equities/etfs.
+    """Search Yahoo Finance for symbols matching a query.
+
+    Returns a list of dictionaries with: {symbol, name, type, exch, exchDisp}.
     """
     q = (query or "").strip()
     if len(q) < 2:
@@ -124,7 +154,7 @@ def search_tickers(query: str, limit: int = 10, region: str = "US", lang: str = 
 
 
 def validate_ticker_symbol(symbol: str) -> bool:
-    """Quick validation by fetching minimal history; returns True if data exists."""
+    """Return True if the symbol has any daily bars in the last month."""
     s = (symbol or "").strip().upper()
     if not s:
         return False
@@ -138,6 +168,10 @@ def validate_ticker_symbol(symbol: str) -> bool:
 
 
 def inclusive_outlier_mask(series: pd.Series, pct_threshold: float) -> pd.Series:
+    """Boolean mask (True=keep) for rows whose |pct_change| <= threshold.
+
+    The first row is always kept (pct_change is NaN).
+    """
     # True means keep
     pct = series.pct_change() * 100.0
     mask = pct.abs().le(pct_threshold) | pct.isna()  # keep first NaN
@@ -147,6 +181,11 @@ def inclusive_outlier_mask(series: pd.Series, pct_threshold: float) -> pd.Series
 
 
 def soften_spikes_train_only(series: pd.Series, train_end_idx: int, threshold: float, factor: float) -> Tuple[pd.Series, List[int]]:
+    """Soften unusually large moves in the training region only.
+
+    For indices 1..train_end_idx, when |pct_change| >= threshold, pull the value toward
+    the previous one by a fraction (factor). Returns the modified series and changed indices.
+    """
     s = series.copy().astype(float)
     changed_idx: List[int] = []
     pct = s.pct_change() * 100.0
@@ -160,41 +199,116 @@ def soften_spikes_train_only(series: pd.Series, train_end_idx: int, threshold: f
 
 
 def make_windows_close_only(values: np.ndarray, window: int) -> Tuple[np.ndarray, np.ndarray]:
-    X, y = [], []
-    for i in range(window, len(values)):
-        X.append(values[i - window : i])
-        y.append(values[i])
-    return np.array(X), np.array(y)
+        """Create sliding windows (X) and next-step targets (y) from a 1D array.
 
-def _build_keras_model(input_len: int, kind: str = "lstm", dropout: float = 0.3) -> Any:
+        Example: values=[v0,v1,v2,v3,v4], window=3 ->
+            X=[[v0,v1,v2],[v1,v2,v3]] and y=[v3,v4]
+        """
+        X, y = [], []
+        # Start at index=`window` so there are `window` items behind us
+        for i in range(window, len(values)):
+                # Input window is the previous `window` values
+                X.append(values[i - window : i])
+                # Target is the current value
+                y.append(values[i])
+        return np.array(X), np.array(y)
+
+def _compile(seq: Any, learning_rate: float = 1e-3) -> Any:
+    """Compile a Keras model using Adam optimizer and MSE loss."""
+    # Helper to compile with a consistent optimizer/loss
+    seq.compile(optimizer=keras.optimizers.Adam(learning_rate=learning_rate), loss="mse")
+    return seq
+
+def _build_keras_model_lstm(input_len: int, dropout: float = 0.3, learning_rate: float = 1e-3) -> Any:
+    """Simple LSTM regressor for univariate sequences (shape: [steps=input_len, 1])."""
     if keras is None or layers is None:
         raise RuntimeError(
             "Neural models require TensorFlow/Keras. Select 'sklearn (fast)' or install a compatible TensorFlow package."
         )
-    kind = (kind or "lstm").lower()
-    is_gru = "gru" in kind
-    bi = kind.startswith("bi") or kind in {"bilstm", "bigru", "bidirectional lstm", "bidirectional gru"}
-    deep = kind.startswith("deep") or ("deep" in kind)
+    seq = keras.Sequential([
+        layers.Input(shape=(input_len, 1)),
+        layers.LSTM(64, return_sequences=False),
+        layers.Dropout(dropout),
+        layers.Dense(1),
+    ])
+    return _compile(seq, learning_rate)
 
-    seq = keras.Sequential()
-    seq.add(layers.Input(shape=(input_len, 1)))
-    RNN = layers.GRU if is_gru else layers.LSTM
-    if bi:
-        seq.add(layers.Bidirectional(RNN(64, return_sequences=deep)))
-    else:
-        seq.add(RNN(64, return_sequences=deep))
-    seq.add(layers.Dropout(dropout))
-    if deep:
-        if bi:
-            seq.add(layers.Bidirectional(RNN(32)))
-        else:
-            seq.add(RNN(32))
-        seq.add(layers.Dropout(dropout))
-    seq.add(layers.Dense(1))
-    seq.compile(optimizer="adam", loss="mse")
-    return seq
+def _build_keras_model_gru(input_len: int, dropout: float = 0.3, learning_rate: float = 1e-3) -> Any:
+    """Simple GRU regressor for univariate sequences."""
+    if keras is None or layers is None:
+        raise RuntimeError(
+            "Neural models require TensorFlow/Keras. Select 'sklearn (fast)' or install a compatible TensorFlow package."
+        )
+    seq = keras.Sequential([
+        layers.Input(shape=(input_len, 1)),
+        layers.GRU(64, return_sequences=False),
+        layers.Dropout(dropout),
+        layers.Dense(1),
+    ])
+    return _compile(seq, learning_rate)
+
+def _build_keras_model_bilstm(input_len: int, dropout: float = 0.3, learning_rate: float = 1e-3) -> Any:
+    """Bidirectional LSTM regressor."""
+    if keras is None or layers is None:
+        raise RuntimeError(
+            "Neural models require TensorFlow/Keras. Select 'sklearn (fast)' or install a compatible TensorFlow package."
+        )
+    seq = keras.Sequential([
+        layers.Input(shape=(input_len, 1)),
+        layers.Bidirectional(layers.LSTM(64, return_sequences=False)),
+        layers.Dropout(dropout),
+        layers.Dense(1),
+    ])
+    return _compile(seq, learning_rate)
+
+def _build_keras_model_bigru(input_len: int, dropout: float = 0.3, learning_rate: float = 1e-3) -> Any:
+    """Bidirectional GRU regressor."""
+    if keras is None or layers is None:
+        raise RuntimeError(
+            "Neural models require TensorFlow/Keras. Select 'sklearn (fast)' or install a compatible TensorFlow package."
+        )
+    seq = keras.Sequential([
+        layers.Input(shape=(input_len, 1)),
+        layers.Bidirectional(layers.GRU(64, return_sequences=False)),
+        layers.Dropout(dropout),
+        layers.Dense(1),
+    ])
+    return _compile(seq, learning_rate)
+
+def _build_keras_model_deep_lstm(input_len: int, dropout: float = 0.3, learning_rate: float = 1e-3) -> Any:
+    """Two-layer (stacked) LSTM regressor."""
+    if keras is None or layers is None:
+        raise RuntimeError(
+            "Neural models require TensorFlow/Keras. Select 'sklearn (fast)' or install a compatible TensorFlow package."
+        )
+    seq = keras.Sequential([
+        layers.Input(shape=(input_len, 1)),
+        layers.LSTM(64, return_sequences=True),
+        layers.Dropout(dropout),
+        layers.LSTM(32, return_sequences=False),
+        layers.Dropout(dropout),
+        layers.Dense(1),
+    ])
+    return _compile(seq, learning_rate)
+
+def _build_keras_model_deep_gru(input_len: int, dropout: float = 0.3, learning_rate: float = 1e-3) -> Any:
+    """Two-layer (stacked) GRU regressor."""
+    if keras is None or layers is None:
+        raise RuntimeError(
+            "Neural models require TensorFlow/Keras. Select 'sklearn (fast)' or install a compatible TensorFlow package."
+        )
+    seq = keras.Sequential([
+        layers.Input(shape=(input_len, 1)),
+        layers.GRU(64, return_sequences=True),
+        layers.Dropout(dropout),
+        layers.GRU(32, return_sequences=False),
+        layers.Dropout(dropout),
+        layers.Dense(1),
+    ])
+    return _compile(seq, learning_rate)
 
 def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Compute regression metrics: RMSE, MAE, MAPE (%), and R²."""
     if len(y_true) == 0 or len(y_pred) == 0:
         return {"RMSE": float("nan"), "MAE": float("nan"), "MAPE": float("nan"), "R2": float("nan")}
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
@@ -212,8 +326,20 @@ def _train_and_forecast_core(
     epochs: int,
     batch_size: int,
     dropout: float,
+    learning_rate: float = 1e-3,
     progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
 ) -> Dict[str, Any]:
+    """Train a model on close prices and forecast future values.
+
+    Pipeline overview
+    1) Optional: filter outliers and/or soften spikes (train only)
+    2) Scale prices (fit on train subset only to avoid leakage)
+    3) Build sliding windows on the scaled series
+    4) Chronologically split into train and test
+    5) Train either a sklearn regressor or a Keras model
+    6) Evaluate on test (inverse-scaled metrics)
+    7) Forecast `horizon` future days iteratively (capped to 7)
+    """
     # Prepare base series
     close = df["price"].astype(float).reset_index(drop=True)
 
@@ -233,7 +359,6 @@ def _train_and_forecast_core(
 
     # Train-only spike softening before scaling
     close_train = close_filtered.iloc[:train_n]
-    close_test = close_filtered.iloc[train_n:]
 
     changed_idx: List[int] = []
     if cfg.soften_spikes:
@@ -243,7 +368,7 @@ def _train_and_forecast_core(
         close_train = soft_train.iloc[:train_n]
         changed_idx = [i for i in changed if i < train_n]
 
-    # Scale
+    # Scale (fit on training portion only)
     scaler = StandardScaler()
     train_vals = close_train.values.reshape(-1, 1)
     scaler.fit(train_vals)
@@ -251,7 +376,7 @@ def _train_and_forecast_core(
 
     # Windows on scaled series
     X_all, y_all = make_windows_close_only(full_scaled, cfg.window)
-    # determine split index in windowed space
+    # Determine split index in windowed space
     split_idx = max(1, train_n - cfg.window)
     X_train, y_train = X_all[:split_idx], y_all[:split_idx]
     X_test, y_test = X_all[split_idx:], y_all[split_idx:]
@@ -264,11 +389,23 @@ def _train_and_forecast_core(
             raise RuntimeError(
                 "TensorFlow/Keras is not available in this environment. Install TensorFlow (CPU) compatible with Python 3.12 (e.g., 2.16.1) or switch to 'sklearn (fast)'."
             )
-        # reshape to [samples, timesteps, features]
+        # Reshape to [samples, timesteps, features] for Keras layers
         Xtr = X_train[..., None]
         Xte = X_test[..., None]
         Xall = X_all[..., None]
-        model = _build_keras_model(cfg.window, mk, dropout=dropout)
+        builders = {
+            "lstm": _build_keras_model_lstm,
+            "gru": _build_keras_model_gru,
+            "bilstm": _build_keras_model_bilstm,
+            "bigru": _build_keras_model_bigru,
+            "deep-lstm": _build_keras_model_deep_lstm,
+            "deep-gru": _build_keras_model_deep_gru,
+        }
+        builder = builders.get(mk)
+        if builder is None:
+            raise ValueError(f"Unknown neural model kind: {mk}")
+        # Build the neural model with the desired learning rate
+        model = builder(cfg.window, dropout=dropout, learning_rate=float(learning_rate))
         # Train one epoch at a time to report progress
         total_epochs = int(max(1, epochs))
         history = {"loss": [], "val_loss": []}
@@ -304,7 +441,6 @@ def _train_and_forecast_core(
         return scaler.inverse_transform(np.array(v).reshape(-1, 1)).flatten()
 
     fitted_prices = inv(y_pred_all)
-    actual_prices = inv(y_all)
     # Metrics on test region (inverse scaled)
     if len(y_test):
         y_test_inv = inv(y_test)
@@ -313,16 +449,17 @@ def _train_and_forecast_core(
     else:
         m = {"RMSE": float("nan"), "MAE": float("nan"), "MAPE": float("nan"), "R2": float("nan")}
 
-    # build aligned series to original filtered timeline
+    # Build fitted series aligned to the filtered timeline
     fitted_full = [np.nan] * len(full_scaled)
     # windows produce predictions starting at index cfg.window
     for i, val in enumerate(fitted_prices, start=cfg.window):
         fitted_full[i] = val
 
-    # Future forecasting (iterative)
+    # Future forecasting (iterative) with horizon capped at 7 days
     last_window = full_scaled[-cfg.window :].tolist()
     future_scaled = []
-    for _ in range(cfg.horizon):
+    horizon_used = int(max(1, min(int(cfg.horizon), 7)))
+    for _ in range(horizon_used):
         if mk != "sklearn":
             # Keras models expect [batch, timesteps, features]
             x_in = np.array(last_window, dtype=float).reshape(1, cfg.window, 1)
@@ -337,6 +474,8 @@ def _train_and_forecast_core(
 
     # Map filtered indices back to original df indices
     kept_indices = np.where(kept_mask.values)[0].tolist()
+    # Collect the filtered dates aligned to the modeling series (timezone-naive)
+    dates_filtered = pd.to_datetime(df["date"]).dt.tz_localize(None).iloc[kept_indices].tolist()
 
     # Derive train/test boundary in original filtered index
     test_start_idx = cfg.window + split_idx  # in filtered index space
@@ -350,9 +489,19 @@ def _train_and_forecast_core(
         "features": "close",
         "changed_train_indices": changed_idx,
         "future": future_prices.tolist(),
+    "horizon_used": int(horizon_used),
         "metrics": m,
         "history": history,
         "model": mk,
+        # Expose windowed arrays for reporting (ND array view in UI)
+        "X_train": X_train,  # 2D: [n_samples, window]
+        "y_train": y_train,
+        "X_test": X_test,
+        "y_test": y_test,
+        "window": int(cfg.window),
+    # Unscaled series and dates used for training after filtering/softening
+    "close_filtered": close_filtered.tolist(),
+    "dates_filtered": dates_filtered,
     }
 
 
@@ -362,9 +511,11 @@ def train_and_forecast_close_only_sklearn(
     epochs: int = 1,
     batch_size: int = 32,
     dropout: float = 0.0,
+    learning_rate: float = 1e-3,
     progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
 ) -> Dict[str, Any]:
-    return _train_and_forecast_core(df, cfg, model_kind="sklearn", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=None)
+    """Train/evaluate using the fast scikit-learn model (no TensorFlow required)."""
+    return _train_and_forecast_core(df, cfg, model_kind="sklearn", epochs=epochs, batch_size=batch_size, dropout=dropout, learning_rate=learning_rate, progress_callback=None)
 
 
 def train_and_forecast_close_only_lstm(
@@ -373,9 +524,11 @@ def train_and_forecast_close_only_lstm(
     epochs: int = 30,
     batch_size: int = 32,
     dropout: float = 0.3,
+    learning_rate: float = 1e-3,
     progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
 ) -> Dict[str, Any]:
-    return _train_and_forecast_core(df, cfg, model_kind="lstm", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+    """Train/evaluate using an LSTM (requires TensorFlow/Keras)."""
+    return _train_and_forecast_core(df, cfg, model_kind="lstm", epochs=epochs, batch_size=batch_size, dropout=dropout, learning_rate=learning_rate, progress_callback=progress_callback)
 
 
 def train_and_forecast_close_only_gru(
@@ -384,9 +537,11 @@ def train_and_forecast_close_only_gru(
     epochs: int = 30,
     batch_size: int = 32,
     dropout: float = 0.3,
+    learning_rate: float = 1e-3,
     progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
 ) -> Dict[str, Any]:
-    return _train_and_forecast_core(df, cfg, model_kind="gru", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+    """Train/evaluate using a GRU (requires TensorFlow/Keras)."""
+    return _train_and_forecast_core(df, cfg, model_kind="gru", epochs=epochs, batch_size=batch_size, dropout=dropout, learning_rate=learning_rate, progress_callback=progress_callback)
 
 
 def train_and_forecast_close_only_bilstm(
@@ -395,9 +550,11 @@ def train_and_forecast_close_only_bilstm(
     epochs: int = 30,
     batch_size: int = 32,
     dropout: float = 0.3,
+    learning_rate: float = 1e-3,
     progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
 ) -> Dict[str, Any]:
-    return _train_and_forecast_core(df, cfg, model_kind="bilstm", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+    """Train/evaluate using a bidirectional LSTM (requires TensorFlow/Keras)."""
+    return _train_and_forecast_core(df, cfg, model_kind="bilstm", epochs=epochs, batch_size=batch_size, dropout=dropout, learning_rate=learning_rate, progress_callback=progress_callback)
 
 
 def train_and_forecast_close_only_bigru(
@@ -406,9 +563,11 @@ def train_and_forecast_close_only_bigru(
     epochs: int = 30,
     batch_size: int = 32,
     dropout: float = 0.3,
+    learning_rate: float = 1e-3,
     progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
 ) -> Dict[str, Any]:
-    return _train_and_forecast_core(df, cfg, model_kind="bigru", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+    """Train/evaluate using a bidirectional GRU (requires TensorFlow/Keras)."""
+    return _train_and_forecast_core(df, cfg, model_kind="bigru", epochs=epochs, batch_size=batch_size, dropout=dropout, learning_rate=learning_rate, progress_callback=progress_callback)
 
 
 def train_and_forecast_close_only_deep_lstm(
@@ -417,9 +576,11 @@ def train_and_forecast_close_only_deep_lstm(
     epochs: int = 30,
     batch_size: int = 32,
     dropout: float = 0.3,
+    learning_rate: float = 1e-3,
     progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
 ) -> Dict[str, Any]:
-    return _train_and_forecast_core(df, cfg, model_kind="deep-lstm", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+    """Train/evaluate using a deeper (stacked) LSTM (requires TensorFlow/Keras)."""
+    return _train_and_forecast_core(df, cfg, model_kind="deep-lstm", epochs=epochs, batch_size=batch_size, dropout=dropout, learning_rate=learning_rate, progress_callback=progress_callback)
 
 
 def train_and_forecast_close_only_deep_gru(
@@ -428,9 +589,11 @@ def train_and_forecast_close_only_deep_gru(
     epochs: int = 30,
     batch_size: int = 32,
     dropout: float = 0.3,
+    learning_rate: float = 1e-3,
     progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
 ) -> Dict[str, Any]:
-    return _train_and_forecast_core(df, cfg, model_kind="deep-gru", epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+    """Train/evaluate using a deeper (stacked) GRU (requires TensorFlow/Keras)."""
+    return _train_and_forecast_core(df, cfg, model_kind="deep-gru", epochs=epochs, batch_size=batch_size, dropout=dropout, learning_rate=learning_rate, progress_callback=progress_callback)
 
 
 def train_and_forecast_close_only(
@@ -440,9 +603,13 @@ def train_and_forecast_close_only(
     epochs: int = 30,
     batch_size: int = 32,
     dropout: float = 0.3,
+    learning_rate: float = 1e-3,
     progress_callback: Optional[Callable[[int, int, Optional[float]], None]] = None,
 ) -> Dict[str, Any]:
-    """Backward-compatible wrapper. Prefer calling the specific functions above for readability."""
+    """Train and forecast using the selected model kind.
+
+    Backward-compatible wrapper. Prefer the specific functions above for readability.
+    """
     mapper = {
         "sklearn": train_and_forecast_close_only_sklearn,
         "lstm": train_and_forecast_close_only_lstm,
@@ -454,10 +621,11 @@ def train_and_forecast_close_only(
     }
     mk = (model_kind or "sklearn").lower()
     func = mapper.get(mk, train_and_forecast_close_only_sklearn)
-    return func(df, cfg, epochs=epochs, batch_size=batch_size, dropout=dropout, progress_callback=progress_callback)
+    return func(df, cfg, epochs=epochs, batch_size=batch_size, dropout=dropout, learning_rate=learning_rate, progress_callback=progress_callback)
 
 
 def get_company_name(ticker: str) -> Optional[str]:
+    """Best-effort attempt to get the company short name for a ticker."""
     import json
     try:
         info = yf.Ticker(ticker).fast_info

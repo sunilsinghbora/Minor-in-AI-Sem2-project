@@ -168,23 +168,27 @@ if "pending_run" not in st.session_state:
 with st.sidebar:
     st.header("Controls")
     # Single-box autocomplete if available, else fallback to text + matches
-    ticker = "MSFT"
+    last_ticker = st.session_state.get("ticker", "")
+    ticker = last_ticker
     if SEARCHBOX_AVAILABLE:
         def _search_fn(term: str):
             res = search_tickers(term or "", limit=8)
             return [f"{s['symbol']} — {s.get('name','')} ({s.get('exchDisp','')})" for s in res]
-
+        # Use previously chosen label if any; otherwise leave empty
+        default_label = st.session_state.get("ticker_label", "")
         picked_label = st_searchbox(
             _search_fn,
             key="ticker_searchbox",
-            default="MSFT — Microsoft Corporation (NasdaqGS)",
+            default=default_label,
             placeholder="Type symbol or company name",
         )
         if picked_label:
             ticker = picked_label.split(" — ")[0].strip().upper()
+            st.session_state["ticker_label"] = picked_label
+            st.session_state["ticker"] = ticker
     else:
         # Fallback: Search-as-you-type with separate Matches list
-        ti = st.text_input("Search ticker or company", value="MSFT", help="Type symbol (e.g., MSFT) or company name")
+        ti = st.text_input("Search ticker or company", value=last_ticker, help="Type symbol (e.g., MSFT) or company name")
         query = (ti or "").strip()
         suggestions = search_tickers(query, limit=8) if len(query) >= 2 else []
         formats = [f"{s['symbol']} — {s.get('name','')} ({s.get('exchDisp','')})" for s in suggestions]
@@ -194,17 +198,31 @@ with st.sidebar:
             ticker = sel["symbol"].upper()
         else:
             ticker = query.upper()
+        st.session_state["ticker"] = ticker
 
     # Validate ticker before allowing run
     is_valid = validate_ticker_symbol(ticker) if len(ticker) >= 1 else False
     if ticker and not is_valid:
         st.warning("Ticker looks invalid or has no recent data. Please pick a valid symbol.")
-    period = st.selectbox(
-        "History (training)",
-        ["1y", "2y", "5y", "10y", "20y", "25y", "max"],
-        index=0,
-        help="Training uses at least 1 year. Use Quick view below to zoom chart.",
-    )
+
+    # Preload full history for date bounds
+    df_all = None
+    min_date = None
+    max_date = None
+    default_start = None
+    default_end = None
+    if is_valid:
+        try:
+            df_all = fetch_prices(ticker, period="max")
+            dates_series_sb = pd.to_datetime(df_all["date"]).dt.tz_localize(None)
+            min_date = dates_series_sb.iloc[0].date()
+            max_date = dates_series_sb.iloc[-1].date()
+            # Default to last 10 years (clamped to available min)
+            ten_years_ago = (dates_series_sb.iloc[-1] - pd.DateOffset(years=10)).date()
+            default_start = ten_years_ago if ten_years_ago > min_date else min_date
+            default_end = max_date
+        except Exception:
+            pass
 
     st.subheader("Model")
     model_options = ["sklearn (fast)"] if not TF_AVAILABLE else [
@@ -224,12 +242,68 @@ with st.sidebar:
     )
     if not TF_AVAILABLE:
         st.caption("Neural models are disabled because TensorFlow is not available. Install a compatible TF to enable them.")
-    window = st.slider("Window", 10, 120, 30, 1)
-    horizon = st.slider("Horizon (days)", 1, 120, 10, 1)
+    # Training dates shown just after model selection
+    st.subheader("Training dates")
+    start_date = st.date_input(
+        "Start date",
+        value=st.session_state.get("start_date", default_start),
+        min_value=min_date,
+        max_value=max_date,
+        key="start_date_input",
+    ) if min_date and max_date else None
+    end_date = st.date_input(
+        "End date",
+        value=st.session_state.get("end_date", default_end),
+        min_value=min_date,
+        max_value=max_date,
+        key="end_date_input",
+    ) if min_date and max_date else None
+
+    window_options = [3, 5] + list(range(10, 95, 5))  # 10..90
+    default_window = 30 if 30 in window_options else window_options[0]
+    window = st.selectbox("Window", window_options, index=window_options.index(default_window))
+    horizon = st.slider("Horizon (days)", 1, 7, min(7, 10), 1)
     test_split = st.slider("Test split (%)", 5, 30, 10, 1) / 100.0
     epochs = st.slider("Epochs (neural models)", 5, 100, 30, 5)
     batch_size = st.selectbox("Batch size", [16, 32, 64, 128], index=1)
     dropout = st.slider("Dropout", 0.0, 0.8, 0.3, 0.05)
+    # Advanced (neural) options
+    learning_rate = 1e-4  # default 0.1e-3 as requested
+    if TF_AVAILABLE and model_kind != "sklearn (fast)":
+        with st.expander("Advanced (neural)", expanded=False):
+            lr_labels = ["Low (1e-4)", "Default (1e-3)", "High (3e-3)"]
+            lr_map = {"Low (1e-4)": 1e-4, "Default (1e-3)": 1e-3, "High (3e-3)": 3e-3}
+            sel = st.selectbox("Learning rate", lr_labels, index=0, help="Step size for optimizer updates. Keep Low/Default unless you know you need faster/slower training.")
+            learning_rate = float(lr_map.get(sel, 1e-4))
+
+    dates_ok = True
+    range_len = None
+    if df_all is not None and start_date and end_date:
+        if start_date > end_date:
+            st.error("Start date cannot be after end date.")
+            dates_ok = False
+        # Count rows in the selected range
+        try:
+            mask_sb = (
+                (pd.to_datetime(df_all["date"]).dt.tz_localize(None) >= pd.to_datetime(start_date)) &
+                (pd.to_datetime(df_all["date"]).dt.tz_localize(None) <= pd.to_datetime(end_date))
+            )
+            range_len = int(mask_sb.sum())
+            # Require at least window + 5 samples for minimal training
+            min_needed = max(30, int(window) + 5)
+            if range_len < min_needed:
+                st.warning(f"Selected range has only {range_len} rows; needs at least {min_needed} for window={window}.")
+                dates_ok = False
+        except Exception:
+            pass
+    else:
+        # If we couldn't load dates, keep disabled
+        dates_ok = False if is_valid else False
+
+    # Persist in session
+    if start_date and end_date:
+        st.session_state["start_date"] = start_date
+        st.session_state["end_date"] = end_date
 
     st.subheader("Outliers")
     filter_outliers = st.checkbox("Enable outlier filter (±%)", value=False)
@@ -242,7 +316,7 @@ with st.sidebar:
 
     # Display options removed per request: no quick view or debug toggles
 
-    run_btn = st.button("Run analysis", type="primary", disabled=not is_valid)
+    run_btn = st.button("Run analysis", type="primary", disabled=(not is_valid) or (not dates_ok))
 
 st.title("Stock Forecast")
 
@@ -250,7 +324,7 @@ st.title("Stock Forecast")
 if run_btn and ticker:
     params = {
         "ticker": ticker,
-        "period": period,
+    # date range will be handled using session state selection below
         "model_kind": model_kind,
         "window": window,
         "horizon": horizon,
@@ -258,13 +332,16 @@ if run_btn and ticker:
         "epochs": epochs,
         "batch_size": batch_size,
         "dropout": dropout,
+    "learning_rate": float(learning_rate),
         "filter_outliers": filter_outliers,
         "outlier_threshold": float(outlier_threshold),
         "soften_spikes": soften,
         "spike_threshold": float(spike_threshold),
         "spike_factor": float(spike_factor),
     }
-    st.session_state.clear()
+    # Preserve existing selections (ticker, dates, etc.)
+    if "analysis" in st.session_state:
+        del st.session_state["analysis"]
     st.session_state["pending_run"] = params
     st.rerun()
 
@@ -273,7 +350,18 @@ if st.session_state.get("pending_run"):
     p = st.session_state.pop("pending_run")
     try:
         with st.spinner("Fetching data…"):
-            df = fetch_prices(p["ticker"], period=p["period"])
+            # Always fetch max, then slice by selected date range
+            df_all = fetch_prices(p["ticker"], period="max")
+        sdt = st.session_state.get("start_date")
+        edt = st.session_state.get("end_date")
+        if sdt and edt:
+            start = pd.to_datetime(sdt)
+            end = pd.to_datetime(edt)
+            df = df_all[(pd.to_datetime(df_all["date"]).dt.tz_localize(None) >= start.tz_localize(None)) & (pd.to_datetime(df_all["date"]).dt.tz_localize(None) <= end.tz_localize(None))].reset_index(drop=True)
+            if len(df) < max(30, int(p["window"]) + 5):
+                st.warning("Selected date range is too short; consider a longer range for reliable training.")
+        else:
+            df = df_all
         name = get_company_name(p["ticker"]) or ""
         st.caption(f"{p['ticker']} • {name}")
 
@@ -307,6 +395,7 @@ if st.session_state.get("pending_run"):
             epochs=p["epochs"],
             batch_size=p["batch_size"],
             dropout=p["dropout"],
+            learning_rate=p.get("learning_rate", 1e-4),
             progress_callback=on_progress if mk != "sklearn" else None,
         )
         progress.empty()
@@ -315,7 +404,7 @@ if st.session_state.get("pending_run"):
         # Save fresh analysis
         st.session_state["analysis"] = {
             "ticker": p["ticker"],
-            "period": p["period"],
+            "period": "custom-range",
             "name": name,
             "df": df,
             "result": result,
@@ -324,6 +413,7 @@ if st.session_state.get("pending_run"):
                 "epochs": p["epochs"],
                 "batch_size": p["batch_size"],
                 "dropout": p["dropout"],
+                "learning_rate": p.get("learning_rate", 1e-4),
                 "filter_outliers": p["filter_outliers"],
                 "outlier_threshold": p["outlier_threshold"],
                 "soften_spikes": p["soften_spikes"],
@@ -425,6 +515,26 @@ if analysis:
                 _add_trace_safe(figh, ep, y_vloss, mode="lines", name="val_loss", line=dict(color="#ff7f0e"))
             figh.update_layout(height=250, template="plotly_white", title="Training history")
             _safe_plot(figh)
+        # Show an unscaled window preview table: Date | past window values | Prediction
+        try:
+            window_size = int(result.get("window", 0))
+            close_filtered = result.get("close_filtered") or []
+            dates_filtered = result.get("dates_filtered") or []
+            fitted_filtered = result.get("fitted_on_filtered") or []
+            if window_size and len(close_filtered) >= window_size + 1:
+                rows = []
+                boundary = int(result.get("train_test_boundary", len(close_filtered)))
+                start_i = max(window_size, boundary - 5)
+                end_i = min(boundary, len(close_filtered))
+                for i in range(start_i, end_i):
+                    date_str = pd.to_datetime(dates_filtered[i]).strftime("%Y-%m-%d") if i < len(dates_filtered) else str(i)
+                    window_vals = close_filtered[i - window_size : i]
+                    pred_val = fitted_filtered[i] if i < len(fitted_filtered) else None
+                    rows.append([date_str] + list(window_vals) + [pred_val])
+                cols = ["Date"] + [f"t-{k}" for k in range(window_size, 0, -1)] + ["Prediction"]
+                st.dataframe(pd.DataFrame(rows, columns=cols))
+        except Exception:
+            pass
         # Offer CSV download for the exact training subset used
         try:
             csv_bytes = training_df.to_csv(index=False).encode("utf-8")
@@ -437,3 +547,19 @@ if analysis:
             )
         except Exception:
             pass
+
+else:
+    # When a ticker is selected but before running, show the raw price chart.
+    selected = st.session_state.get("ticker", None)
+    if selected and validate_ticker_symbol(selected):
+        with st.spinner("Fetching data…"):
+            df_all = fetch_prices(selected, period="max")
+        st.subheader(f"{selected} price history")
+        dates_series = pd.to_datetime(df_all["date"]).dt.tz_localize(None)
+        dates = dates_series.dt.strftime("%Y-%m-%d").tolist()
+        prices = df_all["price"].astype(float).values
+        fig0 = go.Figure()
+        _add_trace_safe(fig0, dates, prices, mode="lines", name="Actual", line=dict(color="#000000", width=2))
+        fig0.update_layout(template="plotly_white", height=450, legend_orientation="h")
+        _safe_plot(fig0)
+        st.caption("Pick Start/End dates in the sidebar, then click Run analysis.")
