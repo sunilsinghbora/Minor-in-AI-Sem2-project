@@ -1,0 +1,55 @@
+
+Collecting usage statistics. To deactivate, set browser.gatherUsageStats to false.
+
+
+  You can now view your Streamlit app in your browser.
+
+  URL: http://0.0.0.0:8507
+
+2025-08-23 20:36:56.752187: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+[31m──[0m[31m────────────────────────[0m[31m [0m[1;31mTraceback [0m[1;2;31m(most recent call last)[0m[31m [0m[31m─────────────────────────[0m[31m──[0m
+[31m [0m [2m/usr/local/python/3.12.1/lib/python3.12/site-packages/streamlit/runtime/scriptrunner[0m [31m [0m
+[31m [0m [2m/[0m[1mexec_code.py[0m:128 in exec_func_with_error_handling                                   [31m [0m
+[31m [0m                                                                                      [31m [0m
+[31m [0m [2m/usr/local/python/3.12.1/lib/python3.12/site-packages/streamlit/runtime/scriptrunner[0m [31m [0m
+[31m [0m [2m/[0m[1mscript_runner.py[0m:669 in code_to_exec                                                [31m [0m
+[31m [0m                                                                                      [31m [0m
+[31m [0m [2m/workspaces/Minor-in-AI-Sem2-project/[0m[1mstreamlit_app.py[0m:401 in <module>                [31m [0m
+[31m [0m                                                                                      [31m [0m
+[31m [0m   [2m398 [0m[2m│   [0m[94mif[0m show_quick_view:                                                        [31m [0m
+[31m [0m   [2m399 [0m[2m│   │   [0mst.caption([33m"[0m[33mQuick view range[0m[33m"[0m)                                         [31m [0m
+[31m [0m   [2m400 [0m[2m│   │   [0m[2m# API: use 'selection' parameter (not 'default')[0m                       [31m [0m
+[31m [0m [31m❱ [0m401 [2m│   │   [0mzoom = [1;4mst.segmented_control([0m                                           [31m [0m
+[31m [0m   [2m402 [0m[2m│   │   │   [0m[1;4;33m"[0m[1;4;33mView[0m[1;4;33m"[0m[1;4m,[0m                                                            [31m [0m
+[31m [0m   [2m403 [0m[2m│   │   │   [0m[1;4moptions=[[0m[1;4;33m"[0m[1;4;33m1w[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m1m[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m3m[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m6m[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m1y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m2y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m5y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m10y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m20y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m [31m [0m
+[31m [0m   [2m404 [0m[2m│   │   │   [0m[1;4mselection=[0m[1;4;33m"[0m[1;4;33m1y[0m[1;4;33m"[0m[1;4m,[0m                                                    [31m [0m
+[31m [0m                                                                                      [31m [0m
+[31m [0m [2m/usr/local/python/3.12.1/lib/python3.12/site-packages/streamlit/runtime/[0m[1mmetrics_util[0m [31m [0m
+[31m [0m [1m.py[0m:443 in wrapped_func                                                              [31m [0m
+[31m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1;91mTypeError: [0m[1;35mButtonGroupMixin.segmented_control[0m[1m([0m[1m)[0m got an unexpected keyword argument 
+[32m'selection'[0m
+[31m──[0m[31m────────────────────────[0m[31m [0m[1;31mTraceback [0m[1;2;31m(most recent call last)[0m[31m [0m[31m─────────────────────────[0m[31m──[0m
+[31m [0m [2m/usr/local/python/3.12.1/lib/python3.12/site-packages/streamlit/runtime/scriptrunner[0m [31m [0m
+[31m [0m [2m/[0m[1mexec_code.py[0m:128 in exec_func_with_error_handling                                   [31m [0m
+[31m [0m                                                                                      [31m [0m
+[31m [0m [2m/usr/local/python/3.12.1/lib/python3.12/site-packages/streamlit/runtime/scriptrunner[0m [31m [0m
+[31m [0m [2m/[0m[1mscript_runner.py[0m:669 in code_to_exec                                                [31m [0m
+[31m [0m                                                                                      [31m [0m
+[31m [0m [2m/workspaces/Minor-in-AI-Sem2-project/[0m[1mstreamlit_app.py[0m:401 in <module>                [31m [0m
+[31m [0m                                                                                      [31m [0m
+[31m [0m   [2m398 [0m[2m│   [0m[94mif[0m show_quick_view:                                                        [31m [0m
+[31m [0m   [2m399 [0m[2m│   │   [0mst.caption([33m"[0m[33mQuick view range[0m[33m"[0m)                                         [31m [0m
+[31m [0m   [2m400 [0m[2m│   │   [0m[2m# API: use 'selection' parameter (not 'default')[0m                       [31m [0m
+[31m [0m [31m❱ [0m401 [2m│   │   [0mzoom = [1;4mst.segmented_control([0m                                           [31m [0m
+[31m [0m   [2m402 [0m[2m│   │   │   [0m[1;4;33m"[0m[1;4;33mView[0m[1;4;33m"[0m[1;4m,[0m                                                            [31m [0m
+[31m [0m   [2m403 [0m[2m│   │   │   [0m[1;4moptions=[[0m[1;4;33m"[0m[1;4;33m1w[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m1m[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m3m[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m6m[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m1y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m2y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m5y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m10y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m[1;4;33m20y[0m[1;4;33m"[0m[1;4m, [0m[1;4;33m"[0m [31m [0m
+[31m [0m   [2m404 [0m[2m│   │   │   [0m[1;4mselection=[0m[1;4;33m"[0m[1;4;33m1y[0m[1;4;33m"[0m[1;4m,[0m                                                    [31m [0m
+[31m [0m                                                                                      [31m [0m
+[31m [0m [2m/usr/local/python/3.12.1/lib/python3.12/site-packages/streamlit/runtime/[0m[1mmetrics_util[0m [31m [0m
+[31m [0m [1m.py[0m:443 in wrapped_func                                                              [31m [0m
+[31m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1;91mTypeError: [0m[1;35mButtonGroupMixin.segmented_control[0m[1m([0m[1m)[0m got an unexpected keyword argument 
+[32m'selection'[0m
+  Stopping...

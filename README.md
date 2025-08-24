@@ -7,7 +7,6 @@ A Python-only Streamlit app for quick stock analysis and forecasting with:
 - Chronological 90/10 train/test split
 - Plotly chart: Actual (white), Training fit (orange), Testing fit (yellow), Future (green)
 - Company name next to ticker
-- News sentiment from RSS (only if >=5 articles in last ~90 days)
 - History (training/validation loss) is simulated as sklearn doesn’t expose epochs; if you switch to Keras, the modal will show real curves
 
 ## Quick start
@@ -19,4 +18,4 @@ A Python-only Streamlit app for quick stock analysis and forecasting with:
 
 ## Notes
 - Defaults are chosen to run everywhere (CPU). For better accuracy, swap the regressor with a small Keras LSTM and enable GPU if available.
-- Network calls go to Yahoo for prices and RSS; if blocked, try later.
+- Network calls go to Yahoo for prices; if blocked, try later.

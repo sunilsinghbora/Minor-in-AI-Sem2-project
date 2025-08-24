@@ -8,9 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import feedparser
 import requests
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
@@ -25,137 +23,7 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover - allow running w
     keras = None  # type: ignore
     layers = None  # type: ignore
 
-# Optional: FinBERT sentiment (transformer-based). Lazily imported if requested.
-_finbert_pipeline = None
-
-def finbert_available() -> bool:
-    try:
-        import transformers  # noqa: F401
-        return True
-    except (OSError, ImportError, ValueError):
-        return False
-
-def _get_finbert_pipeline():
-    global _finbert_pipeline
-    if _finbert_pipeline is not None:
-        return _finbert_pipeline
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification, TextClassificationPipeline
-    model_name = "yiyanghkust/finbert-tone"
-    tok = AutoTokenizer.from_pretrained(model_name)
-    mdl = AutoModelForSequenceClassification.from_pretrained(model_name)
-    _finbert_pipeline = TextClassificationPipeline(model=mdl, tokenizer=tok, return_all_scores=False)
-    return _finbert_pipeline
-
-def finbert_sentiment_scores(texts: List[str]) -> List[float]:
-    if not texts:
-        return []
-    try:
-        pipe = _get_finbert_pipeline()
-        preds = pipe(texts, truncation=True)
-        out: List[float] = []
-        for p in preds:
-            lab = (p.get('label') or '').lower()
-            sc = float(p.get('score', 0.0))
-            if 'pos' in lab:
-                out.append(sc)
-            elif 'neg' in lab:
-                out.append(-sc)
-            else:
-                out.append(0.0)
-        return out
-    except Exception:
-        return [0.0 for _ in texts]
-
-# Local RNN sentiment model (Keras) — trained on demand
-_rnn_sentiment_model: Any = None
-_rnn_model_dir = Path(__file__).parent / "models" / "headline_rnn"
-
-def _build_headline_rnn(max_tokens: int = 20000, seq_len: int = 64, embed_dim: int = 64, rnn_units: int = 64, dropout: float = 0.3):
-    # String input, include TextVectorization inside for portability
-    from tensorflow.keras import layers as L
-    text_in = L.Input(shape=(1,), dtype=tf.string, name="text")
-    vec = L.TextVectorization(max_tokens=max_tokens, output_mode="int", output_sequence_length=seq_len)
-    # Vectorization layer needs adapt before training — return as a functional edge
-    x = vec(text_in)
-    x = L.Embedding(input_dim=max_tokens, output_dim=embed_dim, mask_zero=True)(x)
-    x = L.Bidirectional(L.GRU(rnn_units))(x)
-    x = L.Dropout(dropout)(x)
-    out = L.Dense(1, activation="sigmoid")(x)
-    model = keras.Model(text_in, out)
-    model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-    return model, vec
-
-def _ensure_rnn_model() -> Any:
-    global _rnn_sentiment_model
-    if _rnn_sentiment_model is not None:
-        return _rnn_sentiment_model
-    model_path = _rnn_model_dir
-    if (model_path / "saved_model.pb").exists() or (model_path.with_suffix(".keras")).exists():
-        try:
-            # Prefer Keras format if present
-            if model_path.with_suffix(".keras").exists():
-                _rnn_sentiment_model = keras.models.load_model(str(model_path.with_suffix(".keras")))
-            else:
-                _rnn_sentiment_model = keras.models.load_model(str(model_path))
-            return _rnn_sentiment_model
-        except (OSError, ImportError, ValueError):
-            import logging
-            logging.exception("Failed to load RNN sentiment model from %s", str(model_path))
-    # Train on demand
-    _train_rnn_model(str(model_path))
-    if model_path.with_suffix(".keras").exists():
-        _rnn_sentiment_model = keras.models.load_model(str(model_path.with_suffix(".keras")))
-    else:
-        _rnn_sentiment_model = keras.models.load_model(str(model_path))
-    return _rnn_sentiment_model
-
-def _train_rnn_model(model_dir: str, epochs: int = 4, batch_size: int = 64):
-    from datasets import load_dataset
-    os.makedirs(model_dir if model_dir.endswith(".keras") is False else os.path.dirname(model_dir), exist_ok=True)
-    ds = load_dataset("financial_phrasebank", "sentences_allagree")
-    data = ds["train"]
-    texts: List[str] = []
-    labels: List[int] = []
-    # Map labels: assume 0=negative, 1=neutral, 2=positive; drop neutral
-    for rec in data:
-        t = rec.get("sentence") or rec.get("text") or ""
-        y = int(rec.get("label", -1))
-        if y == 2:
-            texts.append(t)
-            labels.append(1)
-        elif y == 0:
-            texts.append(t)
-            labels.append(0)
-        else:
-            continue
-    # Simple split
-    n = len(texts)
-    idx = np.arange(n)
-    rng = np.random.default_rng(42)
-    rng.shuffle(idx)
-    split = int(0.85 * n)
-    tr_idx, te_idx = idx[:split], idx[split:]
-    Xtr = [texts[i] for i in tr_idx]
-    ytr = np.array([labels[i] for i in tr_idx], dtype="float32")
-    Xte = [texts[i] for i in te_idx]
-    yte = np.array([labels[i] for i in te_idx], dtype="float32")
-
-    model, vec = _build_headline_rnn()
-    # Adapt vectorizer
-    vec.adapt(tf.data.Dataset.from_tensor_slices(Xtr).batch(256))
-    cb = [keras.callbacks.EarlyStopping(patience=2, restore_best_weights=True, monitor="val_accuracy")]
-    model.fit(np.array(Xtr, dtype=object)[:, None], ytr, validation_data=(np.array(Xte, dtype=object)[:, None], yte), epochs=epochs, batch_size=batch_size, verbose=0, callbacks=cb)
-    # Save as .keras portable format
-    keras_path = Path(model_dir).with_suffix(".keras")
-    model.save(keras_path)
-
-def sentiment_rnn_scores(headlines: List[str]) -> List[float]:
-    if not headlines:
-        return []
-    mdl = _ensure_rnn_model()
-    probs = mdl.predict(np.array(headlines, dtype=object)[:, None], verbose=0).flatten()
-    # map prob to [-1,1]
-    return [float(2 * p - 1) for p in probs]
+"""Sentiment-related utilities removed by request."""
 
 
 @dataclass
@@ -257,14 +125,15 @@ def search_tickers(query: str, limit: int = 10, region: str = "US", lang: str = 
 
 def validate_ticker_symbol(symbol: str) -> bool:
     """Quick validation by fetching minimal history; returns True if data exists."""
+    s = (symbol or "").strip().upper()
+    if not s:
+        return False
     try:
         t = yf.Ticker(s)
         df = t.history(period="1mo", interval="1d", auto_adjust=False)
         return not df.empty
-    except (yf.shared._exceptions.YFRequestError, ValueError, IndexError):
-        return False
-        return not df.empty
     except Exception:
+        # yfinance's internal exception classes vary across versions; fallback to a broad catch
         return False
 
 
@@ -609,78 +478,3 @@ def get_company_name(ticker: str) -> Optional[str]:
         return None
     except json.JSONDecodeError:
         return None
-
-
-def fetch_news_and_sentiment(
-    ticker: str,
-    lookback_days: int = 90,
-    half_life_days: float = 30.0,
-    model: str | None = None,  # 'vader' | 'finbert' | 'rnn'
-) -> Dict[str, Any]:
-    feeds = [
-        f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}",
-        f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en",
-    ]
-    analyzer = SentimentIntensityAnalyzer()
-    items: List[Dict[str, Any]] = []
-    now = dt.datetime.utcnow()
-    cutoff = now - dt.timedelta(days=lookback_days)
-
-    for url in feeds:
-        try:
-            feed = feedparser.parse(url)
-            for e in feed.entries:
-                title = getattr(e, "title", "")
-                link = getattr(e, "link", "")
-                # parse date safely
-                published = None
-                for key in ("published_parsed", "updated_parsed"):
-                    if hasattr(e, key) and getattr(e, key):
-                        tup = getattr(e, key)
-                        published = dt.datetime(*tup[:6])
-                        break
-                if not published or published < cutoff:
-                    continue
-                # recency weight: exponential half-life
-                days = max(0.0, (now - published).total_seconds() / 86400.0)
-                hl = max(1e-6, float(half_life_days))
-                weight = 0.5 ** (days / hl)
-                items.append({
-                    "title": title,
-        except (feedparser.FeedParserError, requests.RequestException) as e:
-            # Log the error for debugging, but continue processing other feeds
-            import logging
-            logging.warning(f"Error parsing feed {url}: {e}")
-            continue
-                    # score computed after collection using requested model
-                    "score": 0.0,
-                    "weight": float(weight),
-                })
-        except Exception:
-            continue
-
-    # Compute sentiment scores
-    chosen = (model or "vader").lower()
-    if items:
-        if chosen == "finbert" and finbert_available():
-            scores = finbert_sentiment_scores([it["title"] for it in items])
-            for it, sc in zip(items, scores):
-                it["score"] = float(sc)
-        elif chosen == "rnn":
-            scores = sentiment_rnn_scores([it["title"] for it in items])
-            for it, sc in zip(items, scores):
-                it["score"] = float(sc)
-        else:
-            for it in items:
-                it["score"] = analyzer.polarity_scores(it["title"])['compound']
-
-    enough = len(items) >= 5
-    avg = float(np.mean([i["score"] for i in items])) if items else 0.0
-    if items:
-        w = np.array([i.get("weight", 1.0) for i in items], dtype=float)
-        s = np.array([i["score"] for i in items], dtype=float)
-        wsum = float(w.sum()) if float(w.sum()) > 0 else 1.0
-        wavg = float((w * s).sum() / wsum)
-    else:
-        wavg = 0.0
-    return {"enough": enough, "average": avg, "weighted_average": wavg, "half_life_days": float(half_life_days), "model": chosen, "articles": items}

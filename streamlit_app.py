@@ -8,16 +8,15 @@ from utils import (
     fetch_prices,
     train_and_forecast_close_only,
     get_company_name,
-    fetch_news_and_sentiment,
     search_tickers,
     validate_ticker_symbol,
 )
 
 # Detect TensorFlow/Keras availability from utils (optional)
 try:
-    U = importlib.import_module("utils")
+    import utils as U  # type: ignore
     TF_AVAILABLE = getattr(U, "keras", None) is not None
-except (ImportError, ModuleNotFoundError):
+except Exception:
     TF_AVAILABLE = False
 
 # Optional single-box autocomplete component
@@ -241,22 +240,7 @@ with st.sidebar:
     spike_threshold = st.slider("Spike threshold %", 5, 25, 10, 1)
     spike_factor = st.slider("Spike factor", 0.1, 0.9, 0.5, 0.1)
 
-    st.subheader("Display")
-    show_quick_view = st.checkbox("Show quick view range", value=False)
-    show_debug = st.checkbox("Show debug info", value=False)
-    color_headlines = st.checkbox("Color headlines by tone", value=True)
-    # Sentiment model choice
-    try:
-        from utils import finbert_available  # type: ignore
-        finbert_ok = finbert_available()
-    except Exception:
-        finbert_ok = False
-    sentiment_model = st.selectbox(
-        "Sentiment model",
-        (["vader", "finbert (RNN)", "headline rnn (local)"] if finbert_ok else ["vader", "headline rnn (local)"]),
-        index=0,
-        help="Choose the sentiment engine. 'headline rnn (local)' trains a small Bi-GRU model on first use.",
-    )
+    # Display options removed per request: no quick view or debug toggles
 
     run_btn = st.button("Run analysis", type="primary", disabled=not is_valid)
 
@@ -364,6 +348,13 @@ if analysis:
     boundary = result["train_test_boundary"]
     future = result["future"]
 
+    # Build training subset used for fitting
+    try:
+        train_idx_original = kept[: boundary] if boundary <= len(kept) else list(kept)
+        training_df = df.iloc[train_idx_original].reset_index(drop=True)
+    except Exception:
+        training_df = df.copy().reset_index(drop=True)
+
     # Dates for plotting
     dates_series = pd.to_datetime(df["date"]).dt.tz_localize(None)
     dates = dates_series.dt.strftime("%Y-%m-%d").tolist()
@@ -385,20 +376,7 @@ if analysis:
 
     # Main chart
     fig = go.Figure()
-    # Optional debug captions
-    if show_debug and (result.get("model") or "").lower() != "sklearn":
-        try:
-            st.caption(
-                f"[debug] x(dates) type={type(dates)} len={len(dates)} sample={dates[:2]} | prices len={len(prices)}"
-            )
-            st.caption(
-                f"[debug] train/test fit len={len(fitted_on_original)} boundary={test_start_original}"
-            )
-            st.caption(
-                f"[debug] future_dates type={type(future_dates)} len={len(future_dates)} sample={future_dates[:2]} | future len={len(future)}"
-            )
-        except Exception:
-            pass
+    # Debug captions removed per request
     _add_trace_safe(fig, dates, prices, mode="lines", name="Actual", line=dict(color="#000000", width=2))
     train_mask = [i <= test_start_original for i in range(len(df))]
     test_mask = [i > test_start_original for i in range(len(df))]
@@ -408,77 +386,27 @@ if analysis:
     fig.update_layout(template="plotly_white", height=550, legend_orientation="h", plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF")
     _safe_plot(fig)
 
-    # Quick view range (optional)
-    if show_quick_view:
-        st.caption("Quick view range")
-        zoom = st.segmented_control("View", options=["1w","1m","3m","6m","1y","2y","5y","10y","20y","max"], default="1y")
-        cutoff = None
-        now = dates_series.iloc[-1]
-        mapping = {"1w":7, "1m":30, "3m":90, "6m":180, "1y":365, "2y":730, "5y":1825, "10y":3650, "20y":7300}
-        if zoom != "max":
-            days = mapping.get(zoom)
-            cutoff = now - pd.Timedelta(days=days)
-        y_actual = [prices[i] if (cutoff is None or dates_series.iloc[i] >= cutoff) else None for i in range(len(df))]
-        y_train = [fitted_on_original[i] if (cutoff is None or dates_series.iloc[i] >= cutoff) and train_mask[i] else None for i in range(len(df))]
-        y_test = [fitted_on_original[i] if (cutoff is None or dates_series.iloc[i] >= cutoff) and test_mask[i] else None for i in range(len(df))]
-        fig2 = go.Figure()
-        _add_trace_safe(fig2, dates, y_actual, mode="lines", name="Actual", line=dict(color="#000000", width=2))
-        _add_trace_safe(fig2, dates, y_train, mode="lines", name="Training fit", line=dict(color="#FFA500", width=2))
-        _add_trace_safe(fig2, dates, y_test, mode="lines", name="Testing fit", line=dict(color="#2E8B57", width=2))
-        fdates, fvals = [], []
-        if len(future_dt):
-            base = cutoff if cutoff is not None else (future_dt[0] - pd.Timedelta(days=1))
-            fmask = [d >= base for d in future_dt]
-            fdates = [d.strftime("%Y-%m-%d") for d, m in zip(future_dt, fmask) if m]
-            fvals = [v for v, m in zip(future, fmask) if m]
-        if fdates and fvals:
-            _add_trace_safe(fig2, fdates, fvals, mode="lines", name="Future", line=dict(color="#FF0000", width=2, dash="dot"))
-        fig2.update_layout(template="plotly_white", height=350, legend_orientation="h", plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF")
-        _safe_plot(fig2)
+    # Quick view range removed per request
 
     # Panels
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Used config")
-        p = analysis["params"]
-        st.json({
-            "features": "close",
-            "scaler": "StandardScaler",
-            "test_split": p.get("test_split"),
-            "model": result.get("model"),
-            "epochs": p.get("epochs"),
-            "batch_size": p.get("batch_size"),
-            "dropout": p.get("dropout"),
-            "filter_outliers": p.get("filter_outliers"),
-            "outlier_threshold": p.get("outlier_threshold"),
-            "soften_spikes": p.get("soften_spikes"),
-            "spike_threshold": p.get("spike_threshold"),
-            "spike_factor": p.get("spike_factor"),
-        })
-    with col2:
-        st.subheader("News sentiment (last 90 days)")
-        if sentiment_model.startswith("headline"):
-            with st.spinner("Loading/training local RNN sentiment model (first run may take a few minutes)…"):
-                news = fetch_news_and_sentiment(ticker, model="rnn")
-        else:
-            news = fetch_news_and_sentiment(ticker, model=("finbert" if sentiment_model.startswith("finbert") else "vader"))
-        if news.get("enough"):
-            st.metric("Weighted sentiment (compound)", f"{news.get('weighted_average', 0.0):.3f}")
-            st.caption(f"Half-life for recency weighting: {news.get('half_life_days', 30)} days")
-            arts = news.get("articles", [])[:10]
-            for art in arts:
-                score = float(art.get("score", 0.0))
-                w = float(art.get("weight", 1.0))
-                color = "green" if score > 0.05 else ("red" if score < -0.05 else "gray")
-                prefix = "🟢" if score > 0.05 else ("🔴" if score < -0.05 else "⚪")
-                if color_headlines:
-                    st.markdown(f"{prefix} <span style='color:{color}'>[{art['title']}]({art['link']})</span> • {art['published'][:10]} • score {score:.2f} • w {w:.2f}", unsafe_allow_html=True)
-                else:
-                    st.write(f"- [{art['title']}]({art['link']}) • {art['published'][:10]} • {score:.2f} • w {w:.2f}")
-        else:
-            st.caption("Not enough recent articles to compute sentiment.")
+    st.subheader("Used config")
+    p = analysis["params"]
+    st.json({
+        "features": "close",
+        "scaler": "StandardScaler",
+        "test_split": p.get("test_split"),
+        "model": result.get("model"),
+        "epochs": p.get("epochs"),
+        "batch_size": p.get("batch_size"),
+        "dropout": p.get("dropout"),
+        "filter_outliers": p.get("filter_outliers"),
+        "outlier_threshold": p.get("outlier_threshold"),
+        "soften_spikes": p.get("soften_spikes"),
+        "spike_threshold": p.get("spike_threshold"),
+        "spike_factor": p.get("spike_factor"),
+    })
 
-    with st.expander("Model metrics and data preview", expanded=True):
+    with st.expander("Model metrics", expanded=True):
         m = result.get("metrics") or {}
         cols = st.columns(4)
         cols[0].metric("RMSE", f"{m.get('RMSE', float('nan')):.2f}")
@@ -497,4 +425,15 @@ if analysis:
                 _add_trace_safe(figh, ep, y_vloss, mode="lines", name="val_loss", line=dict(color="#ff7f0e"))
             figh.update_layout(height=250, template="plotly_white", title="Training history")
             _safe_plot(figh)
-        st.dataframe(df.tail(20))
+        # Offer CSV download for the exact training subset used
+        try:
+            csv_bytes = training_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download training CSV",
+                data=csv_bytes,
+                file_name=f"{ticker}_{analysis['period']}_training.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        except Exception:
+            pass
