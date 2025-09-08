@@ -28,10 +28,16 @@ except Exception:
 
 st.set_page_config(page_title="Stock Forecast (Streamlit)", layout="wide")
 
+# Small helper: test whether a value is a list-like container.
+# Accepts Python lists/tuples and NumPy arrays so callers can branch quickly.
+# Used to detect nested sequence inputs in plotting helpers.
 def _is_listlike(v):
     return isinstance(v, (list, tuple, np.ndarray))
 
 # Ensure Plotly x inputs are always 1D lists of scalars, aligned with y length
+# Normalize a candidate x-axis input for Plotly traces.
+# Converts Series/Index/ndarray to plain lists, flattens trivial nesting,
+# and falls back to positional indices when lengths or shapes don't align.
 def _sanitize_x(x_vals, y_vals):
     try:
         n = len(y_vals) if y_vals is not None else 0
@@ -79,6 +85,9 @@ def _sanitize_x(x_vals, y_vals):
         return list(range(len(y_vals) if y_vals is not None else 0))
 
 def _fix_figure_x(fig: go.Figure) -> go.Figure:
+    # Walk every trace in a Plotly figure and ensure the trace.x array
+    # is a 1-D list aligned with its y values. Converts numpy arrays to
+    # Python lists for safe JSON serialization before updating traces.
     try:
         for tr in fig.data:
             x = getattr(tr, "x", None)
@@ -95,6 +104,9 @@ def _fix_figure_x(fig: go.Figure) -> go.Figure:
     return fig
 
 def _safe_plot(fig: go.Figure):
+    # Safely render a Plotly figure in Streamlit by first normalizing
+    # x arrays; if that fails, rebuild traces with positional x indices
+    # so a fallback chart still appears instead of crashing the app.
     try:
         st.plotly_chart(_fix_figure_x(fig), use_container_width=True)
     except Exception:
@@ -114,6 +126,9 @@ def _safe_plot(fig: go.Figure):
             st.error(str(e))
 
 def _flatten_1d(arr):
+    # Convert various array-like inputs into a flat Python list.
+    # Handles numpy arrays, tuples, nested lists, and ragged sequences.
+    # Returns the input unchanged when it cannot be reasonably flattened.
     try:
         if isinstance(arr, np.ndarray):
             arr = np.squeeze(arr)
@@ -142,6 +157,9 @@ def _flatten_1d(arr):
         return arr
 
 def _add_trace_safe(fig: go.Figure, x, y, **kwargs):
+    # Add a Scatter trace robustly: flatten inputs and fall back to
+    # positional x indices if Plotly rejects the provided x values.
+    # This keeps plotting resilient to ragged or mixed-type sequences.
     # Flatten and sanitize y first
     y1d = _flatten_1d(y)
     # Build a robust x vector
