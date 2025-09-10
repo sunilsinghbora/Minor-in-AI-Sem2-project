@@ -10,19 +10,8 @@ A Python-only Streamlit app for quick stock analysis and forecasting with:
 
 Neural models (LSTM/GRU variants) are supported and enabled on Streamlit Cloud via a CPU build of TensorFlow.
 
+
 ## Quick start
-
-## Disclaimer
-
-The information and predictions provided by this app are for educational and informational purposes only and should not be considered as financial, investment, or trading advice.
-
-The stock market is inherently volatile and unpredictable. While we use historical data and machine learning models to generate forecasts, past performance is not indicative of future results.
-
-You are solely responsible for any investment decisions you make based on the information provided by this app. We strongly recommend consulting with a licensed financial advisor before making any investment decisions.
-
-The creators of this app are not liable for any losses or damages arising from the use of this app or its content.
-
-
 - Install deps
   - pip install -r requirements.txt
 - Run
@@ -43,3 +32,14 @@ Without TensorFlow, the app automatically hides neural options and uses the fast
 ## Notes
 - Defaults are chosen to run everywhere (CPU). Neural models are heavier and optional.
 - Network calls go to Yahoo for prices; if blocked, try later.
+
+
+## Disclaimer
+
+The information and predictions provided by this app are for educational and informational purposes only and should not be considered as financial, investment, or trading advice.
+
+The stock market is inherently volatile and unpredictable. While we use historical data and machine learning models to generate forecasts, past performance is not indicative of future results.
+
+You are solely responsible for any investment decisions you make based on the information provided by this app. We strongly recommend consulting with a licensed financial advisor before making any investment decisions.
+
+The creators of this app are not liable for any losses or damages arising from the use of this app or its content.
