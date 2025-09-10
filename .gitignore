@@ -6,10 +6,15 @@ __pycache__/
 # Virtual environment
 .env
 .venv
+ .venv.bak
 
 # Streamlit temporary PID/log files
 .streamlit-*.pid
 .streamlit-*.log
+
+# Artifact and log folders
+artifacts/
+streamlit.log
 
 # Logs
 *.log
