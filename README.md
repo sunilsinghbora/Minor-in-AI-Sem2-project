@@ -29,6 +29,8 @@ pip install tensorflow==2.20.0
 
 Without TensorFlow, the app automatically hides neural options and uses the fast sklearn model.
 
+Note: Installing TensorFlow on Streamlit Cloud may increase deploy times or fail on resource-limited plans. To enable neural models, install TensorFlow locally or uncomment the `tensorflow-cpu` line in `requirements.txt` and redeploy on a plan that supports larger builds.
+
 ## Notes
 - Defaults are chosen to run everywhere (CPU). Neural models are heavier and optional.
 - Network calls go to Yahoo for prices; if blocked, try later.
