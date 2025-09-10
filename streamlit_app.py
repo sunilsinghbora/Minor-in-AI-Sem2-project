@@ -666,6 +666,10 @@ if st.session_state.get("pending_run"):
         name = get_company_name(p["ticker"]) or ""
         st.caption(f"{p['ticker']} • {name}")
 
+        # Construct ModelConfig with core/required args first. Some
+        # environments may have an older `ModelConfig` signature; avoid
+        # passing optional kwargs that could raise TypeError. Set optional
+        # attributes defensively after construction when supported.
         cfg = ModelConfig(
             window=p["window"],
             horizon=p.get("multi_horizon", p.get("horizon", 1)),
@@ -675,14 +679,26 @@ if st.session_state.get("pending_run"):
             soften_spikes=p["soften_spikes"],
             spike_threshold=float(p["spike_threshold"]),
             spike_factor=float(p["spike_factor"]),
-            add_technical_features=False,
-            add_rolling_mean=bool(p.get("add_rolling_mean", False)),
-            rolling_window=int(p.get("rolling_window", 7)),
-            sma_window=int(p.get("sma_window", 0)),
-            add_rsi=bool(p.get("add_rsi", False)),
-            rsi_window=int(p.get("rsi_window", 14)),
             scaler=p.get("scaler", "standard"),
         )
+
+        # Optional attributes: set only when the dataclass actually exposes them.
+        optional_attrs = {
+            "add_technical_features": False,
+            "add_rolling_mean": bool(p.get("add_rolling_mean", False)),
+            "rolling_window": int(p.get("rolling_window", 7)),
+            "sma_window": int(p.get("sma_window", 0)),
+            "add_rsi": bool(p.get("add_rsi", False)),
+            "rsi_window": int(p.get("rsi_window", 14)),
+        }
+        for k, v in optional_attrs.items():
+            try:
+                if hasattr(cfg, k):
+                    setattr(cfg, k, v)
+            except Exception:
+                # Be conservative: ignore any attribute errors to avoid
+                # crashing the Streamlit UI when signatures differ.
+                pass
 
         # Determine model kind: use sklearn as fallback when TensorFlow isn't available
         if not TF_AVAILABLE:
