@@ -684,7 +684,12 @@ if st.session_state.get("pending_run"):
 
         # Optional attributes: set only when the dataclass actually exposes them.
         optional_attrs = {
-            "add_technical_features": False,
+            # Enable multifeature path when any technical feature was selected
+            "add_technical_features": bool(
+                p.get("add_rolling_mean", False)
+                or int(p.get("sma_window", 0)) > 0
+                or p.get("add_rsi", False)
+            ),
             "add_rolling_mean": bool(p.get("add_rolling_mean", False)),
             "rolling_window": int(p.get("rolling_window", 7)),
             "sma_window": int(p.get("sma_window", 0)),
